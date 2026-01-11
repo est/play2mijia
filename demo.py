@@ -6,7 +6,6 @@ import time
 import urllib.parse
 import urllib.request
 import hmac
-import subprocess
 from pathlib import Path
 
 # --- Core Protocol Logic (Sans-IO) ---
@@ -54,6 +53,30 @@ def rc4_openssl(signed_nonce, data_bytes):
     
     return stdout[1024:]
 
+def mijia_rc4(signed_nonce, data_bytes):
+    """Pure Python RC4 encryption/decryption with 1024-byte drop."""
+    key = base64.b64decode(signed_nonce)
+    S = list(range(256))
+    j = 0
+    for i in range(256):
+        j = (j + S[i] + key[i % len(key)]) % 256
+        S[i], S[j] = S[j], S[i]
+    
+    i = j = 0
+    # Drop first 1024 bytes of keystream
+    for _ in range(1024):
+        i = (i + 1) % 256
+        j = (j + S[i]) % 256
+        S[i], S[j] = S[j], S[i]
+    
+    res = bytearray()
+    for byte in data_bytes:
+        i = (i + 1) % 256
+        j = (j + S[i]) % 256
+        S[i], S[j] = S[j], S[i]
+        res.append(byte ^ S[(S[i] + S[j]) % 256])
+    return bytes(res)
+
 def prepare_request_params(uri, method, signed_nonce, nonce, params, ssecurity):
     """Prepare request parameters with signatures and RC4 encryption."""
     # Sign parameters first
@@ -62,7 +85,7 @@ def prepare_request_params(uri, method, signed_nonce, nonce, params, ssecurity):
     # Encrypt all parameter values
     encrypted_params = {}
     for k, v in params.items():
-        encrypted_v = rc4_openssl(signed_nonce, v.encode())
+        encrypted_v = mijia_rc4(signed_nonce, v.encode())
         encrypted_params[k] = base64.b64encode(encrypted_v).decode()
     
     # Add final signature and auth data
@@ -167,7 +190,7 @@ class MijiaClient:
                 ret_data = json.loads(resp_text)
             except json.JSONDecodeError:
                 # If it's not JSON, it's likely encrypted
-                decrypted_bytes = rc4_openssl(signed_nonce, base64.b64decode(resp_text))
+                decrypted_bytes = mijia_rc4(signed_nonce, base64.b64decode(resp_text))
                 ret_data = json.loads(decrypted_bytes.decode('utf-8'))
             
             if ret_data.get("code", 0) != 0:
